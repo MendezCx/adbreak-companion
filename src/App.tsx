@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { auth, googleProvider } from './firebase';
-import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from 'firebase/auth';
 import type { User } from 'firebase/auth';
 import LiveScreen from './screens/LiveScreen';
 import DashboardScreen from './screens/DashboardScreen';
@@ -22,14 +22,30 @@ export default function App() {
       setUser(firebaseUser);
       setLoading(false);
     });
+
+    getRedirectResult(auth).then((result) => {
+      if (result?.user) {
+        setUser(result.user);
+        setLoading(false);
+      }
+    }).catch(console.error);
+
     return () => unsubscribe();
   }, []);
 
   const login = async () => {
     try {
       googleProvider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, googleProvider);
-    } catch (e) {
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      if (isMobile) {
+        await signInWithRedirect(auth, googleProvider);
+      } else {
+        await signInWithPopup(auth, googleProvider);
+      }
+    } catch (e: any) {
+      if (e.code === 'auth/popup-blocked') {
+        await signInWithRedirect(auth, googleProvider);
+      }
       console.error(e);
     }
   };
