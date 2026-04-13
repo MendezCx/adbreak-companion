@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { auth, googleProvider } from './firebase';
+import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import type { User } from 'firebase/auth';
 import LiveScreen from './screens/LiveScreen';
 import DashboardScreen from './screens/DashboardScreen';
 import AnalyticsScreen from './screens/AnalyticsScreen';
@@ -8,18 +11,54 @@ import SettingsScreen from './screens/SettingsScreen';
 
 type Screen = 'live' | 'dashboard' | 'analytics' | 'simulation' | 'replay' | 'settings';
 
-const mockUser = {
-  displayName: 'Jose Mendez',
-  email: 'josemendez@gmail.com',
-  photoURL: 'https://ui-avatars.com/api/?name=Jose+Mendez&background=4ADE80&color=052e16'
-};
-
 export default function App() {
-  const [loggedIn, setLoggedIn] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
   const [screen, setScreen] = useState<Screen>('live');
   const [simActive, setSimActive] = useState(false);
 
-  if (!loggedIn) {
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const login = async () => {
+    try {
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const logout = async () => {
+    await signOut(auth);
+    setUser(null);
+  };
+
+  if (loading) {
+    return (
+      <div style={{
+        minHeight: '100vh', background: '#0D0D1A',
+        display: 'flex', alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: "'JetBrains Mono', monospace"
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{
+            width: 12, height: 12, borderRadius: '50%',
+            background: '#4ADE80', margin: '0 auto 16px'
+          }} />
+          <div style={{ fontSize: 12, color: 'rgba(232,230,248,0.4)' }}>Loading...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
     return (
       <div style={{
         minHeight: '100vh', background: '#0D0D1A',
@@ -41,7 +80,7 @@ export default function App() {
             Ad experience debugger for mobile game developers
           </p>
         </div>
-        <button onClick={() => setLoggedIn(true)} style={{
+        <button onClick={login} style={{
           background: '#4ADE80', color: '#052e16',
           border: 'none', borderRadius: 8,
           padding: '12px 32px', fontSize: 14,
@@ -70,14 +109,13 @@ export default function App() {
       case 'analytics': return <AnalyticsScreen onRunSim={() => { setSimActive(true); setScreen('live'); }} />;
       case 'simulation': return <SimulationScreen onActivate={() => { setSimActive(true); setScreen('live'); }} />;
       case 'replay': return <ReplayScreen onRunSim={() => { setSimActive(true); setScreen('live'); }} />;
-      case 'settings': return <SettingsScreen onLogout={() => setLoggedIn(false)} user={mockUser as any} />;
+      case 'settings': return <SettingsScreen onLogout={logout} user={user} />;
       default: return <LiveScreen simActive={simActive} setSimActive={setSimActive} />;
     }
   };
 
   return (
     <div style={{ minHeight: '100vh', background: '#0D0D1A', fontFamily: "'JetBrains Mono', monospace", color: '#E8E6F8' }}>
-
       <header style={{
         background: 'rgba(13,13,26,0.95)',
         borderBottom: '0.5px solid rgba(255,255,255,0.07)',
@@ -108,10 +146,10 @@ export default function App() {
             color: '#4ADE80', border: '0.5px solid rgba(74,222,128,0.2)'
           }}>SDK active</span>
           <img
-            src={mockUser.photoURL}
+            src={user.photoURL || ''}
             alt="avatar"
             style={{ width: 28, height: 28, borderRadius: '50%', cursor: 'pointer' }}
-            onClick={() => setLoggedIn(false)}
+            onClick={logout}
           />
         </div>
       </header>
