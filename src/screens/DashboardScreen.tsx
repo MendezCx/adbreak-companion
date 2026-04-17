@@ -1,71 +1,117 @@
 import { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { doc, onSnapshot } from 'firebase/firestore';
-
+import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+ 
+interface AdEvent {
+  id: string;
+  adNetwork: string;
+  adFormat: string;
+  eventType: string;
+  durationMs: number;
+  gameId: string;
+  sessionId: string;
+  timestamp: number;
+  serverTimestamp: any;
+}
+ 
 interface Metrics {
   completion_rate: number;
   churn_rate: number;
   avg_resume_time_ms: number;
-  avg_break_length_ms: number;
   total_breaks: number;
-  unity_ads_pct: number;
-  ironsource_pct: number;
-  applovin_pct: number;
-  admob_pct: number;
-  applovin_avg_duration: number;
+  network_counts: Record<string, number>;
+  network_durations: Record<string, number[]>;
 }
-
+ 
+function computeMetrics(events: AdEvent[]): Metrics {
+  const total = events.filter(e => e.eventType === 'started').length;
+  const completed = events.filter(e => e.eventType === 'completed').length;
+  const skipped = events.filter(e => e.eventType === 'skipped').length;
+  const failed = events.filter(e => e.eventType === 'failed').length;
+ 
+  const completion_rate = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const churn_rate = total > 0 ? parseFloat(((skipped / total) * 100).toFixed(1)) : 0;
+ 
+  const resumeTimes = events.filter(e => e.eventType === 'completed' && e.durationMs > 0).map(e => e.durationMs);
+  const avg_resume_time_ms = resumeTimes.length > 0
+    ? Math.round(resumeTimes.reduce((a, b) => a + b, 0) / resumeTimes.length)
+    : 0;
+ 
+  const network_counts: Record<string, number> = {};
+  const network_durations: Record<string, number[]> = {};
+ 
+  events.filter(e => e.eventType === 'started').forEach(e => {
+    const n = e.adNetwork || 'unknown';
+    network_counts[n] = (network_counts[n] || 0) + 1;
+  });
+ 
+  events.filter(e => e.durationMs > 0).forEach(e => {
+    const n = e.adNetwork || 'unknown';
+    if (!network_durations[n]) network_durations[n] = [];
+    network_durations[n].push(e.durationMs);
+  });
+ 
+  return {
+    completion_rate,
+    churn_rate,
+    avg_resume_time_ms,
+    total_breaks: total,
+    network_counts,
+    network_durations,
+  };
+}
+ 
 export default function DashboardScreen() {
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [events, setEvents] = useState<AdEvent[]>([]);
   const [loading, setLoading] = useState(true);
-
+ 
   useEffect(() => {
-    const ref = doc(db, 'studios', 'demo-studio', 'metrics', 'puzzle-quest');
-    const unsubscribe = onSnapshot(ref, (snap) => {
-      if (snap.exists()) {
-        setMetrics(snap.data() as Metrics);
-      }
+    const q = query(
+      collection(db, 'adEvents'),
+      orderBy('timestamp', 'desc'),
+      limit(200)
+    );
+    const unsubscribe = onSnapshot(q, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as AdEvent));
+      setEvents(data);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
-
+ 
+  const metrics = computeMetrics(events);
+ 
+  const totalNetworkEvents = Object.values(metrics.network_counts).reduce((a, b) => a + b, 0) || 1;
+ 
+  const NETWORK_COLORS: Record<string, string> = {
+    admob: '#4ADE80',
+    unity: '#60A5FA',
+    ironsource: '#A78BFA',
+    applovin: '#F87171',
+    unknown: 'rgba(255,255,255,0.25)',
+  };
+ 
+  const networks = Object.entries(metrics.network_counts).map(([name, count]) => {
+    const durations = metrics.network_durations[name] || [];
+    const avgDuration = durations.length > 0
+      ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000)
+      : null;
+    return {
+      name,
+      pct: Math.round((count / totalNetworkEvents) * 100),
+      color: NETWORK_COLORS[name] || 'rgba(255,255,255,0.25)',
+      flag: avgDuration && avgDuration > 45 ? `${avgDuration}s avg` : null,
+    };
+  }).sort((a, b) => b.pct - a.pct);
+ 
+  const recentEvents = events.slice(0, 5);
+ 
   const fmt = (ms: number) => {
+    if (ms === 0) return '—';
     if (ms < 60000) return `${Math.round(ms / 1000)}s`;
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   };
-
-  const alerts = [
-    {
-      dot: '#F87171',
-      text: `AppLovin avg ${metrics?.applovin_avg_duration ?? 61}s — above 45s threshold`,
-      tag: 'Warn', tagColor: '#F87171',
-      tagBg: 'rgba(248,113,113,0.1)',
-      cardBorder: 'rgba(248,113,113,0.2)'
-    },
-    {
-      dot: '#FBBF24',
-      text: `Slow resume ${((metrics?.avg_resume_time_ms ?? 3200) / 1000).toFixed(1)}s — above 6s target`,
-      tag: 'Review', tagColor: '#FBBF24',
-      tagBg: 'rgba(251,191,36,0.1)',
-      cardBorder: 'rgba(255,255,255,0.07)'
-    },
-    {
-      dot: '#4ADE80',
-      text: `Churn rate ${metrics?.churn_rate ?? 1.8}% — within target`,
-      tag: 'OK', tagColor: '#4ADE80',
-      tagBg: 'rgba(74,222,128,0.1)',
-      cardBorder: 'rgba(255,255,255,0.07)'
-    },
-  ];
-
-  const networks = [
-    { name: 'Unity Ads', pct: metrics?.unity_ads_pct ?? 41, color: '#4ADE80' },
-    { name: 'ironSource', pct: metrics?.ironsource_pct ?? 29, color: '#60A5FA' },
-    { name: 'AppLovin', pct: metrics?.applovin_pct ?? 22, color: '#F87171', flag: `${metrics?.applovin_avg_duration ?? 61}s avg` },
-    { name: 'AdMob', pct: metrics?.admob_pct ?? 8, color: 'rgba(255,255,255,0.25)' },
-  ];
-
+ 
   if (loading) {
     return (
       <div style={{ padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
@@ -76,16 +122,30 @@ export default function DashboardScreen() {
       </div>
     );
   }
-
+ 
+  if (events.length === 0) {
+    return (
+      <div style={{ padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>📭</div>
+          <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.4)', marginBottom: 4 }}>No events yet</div>
+          <div style={{ fontSize: 9, color: 'rgba(232,230,248,0.2)' }}>Events will appear here once your SDK sends data</div>
+        </div>
+      </div>
+    );
+  }
+ 
   return (
     <div style={{ padding: 16, maxWidth: 480, margin: '0 auto' }}>
+ 
+      {/* Session Health */}
       <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Session health</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
         {[
-          { val: `${metrics?.completion_rate ?? 94}%`, label: 'Completion rate', green: true, hero: false },
-          { val: `${metrics?.churn_rate ?? 1.8}%`, label: 'Churn after ad', green: false, hero: false },
-          { val: `${((metrics?.avg_resume_time_ms ?? 3200) / 1000).toFixed(1)}s`, label: 'Resume time ★', green: true, hero: true },
-          { val: fmt(metrics?.avg_break_length_ms ?? 23000), label: 'Avg break length', green: false, hero: false },
+          { val: `${metrics.completion_rate}%`, label: 'Completion rate', green: true, hero: false },
+          { val: `${metrics.churn_rate}%`, label: 'Churn after ad', green: false, hero: false },
+          { val: fmt(metrics.avg_resume_time_ms), label: 'Avg duration ★', green: true, hero: true },
+          { val: `${metrics.total_breaks}`, label: 'Total breaks', green: false, hero: false },
         ].map((s, i) => (
           <div key={i} style={{
             background: s.hero ? 'rgba(74,222,128,0.07)' : '#181828',
@@ -97,42 +157,54 @@ export default function DashboardScreen() {
           </div>
         ))}
       </div>
-
-      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Network breakdown</div>
-      <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
-        {networks.map((n, i) => (
-          <div key={i} style={{ marginBottom: i < networks.length - 1 ? 10 : 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span style={{ fontSize: 11, color: n.flag ? '#F87171' : 'rgba(232,230,248,0.55)' }}>{n.name}</span>
-              <span style={{ fontSize: 10, color: n.color }}>{n.pct}%{n.flag ? ` · ${n.flag}` : ''}</span>
-            </div>
-            <div style={{ height: 3, background: 'rgba(255,255,255,0.07)', borderRadius: 2 }}>
-              <div style={{ height: 3, width: `${n.pct}%`, background: n.color, borderRadius: 2 }} />
-            </div>
+ 
+      {/* Network Breakdown */}
+      {networks.length > 0 && (
+        <>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Network breakdown</div>
+          <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+            {networks.map((n, i) => (
+              <div key={i} style={{ marginBottom: i < networks.length - 1 ? 10 : 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, color: n.flag ? '#F87171' : 'rgba(232,230,248,0.55)', textTransform: 'capitalize' }}>{n.name}</span>
+                  <span style={{ fontSize: 10, color: n.color }}>{n.pct}%{n.flag ? ` · ${n.flag}` : ''}</span>
+                </div>
+                <div style={{ height: 3, background: 'rgba(255,255,255,0.07)', borderRadius: 2 }}>
+                  <div style={{ height: 3, width: `${n.pct}%`, background: n.color, borderRadius: 2 }} />
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
+        </>
+      )}
+ 
+      {/* Recent Events */}
+      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Recent events</div>
+      <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+        {recentEvents.map((e, i) => {
+          const color = e.eventType === 'completed' ? '#4ADE80'
+            : e.eventType === 'failed' ? '#F87171'
+            : e.eventType === 'skipped' ? '#FBBF24'
+            : '#60A5FA';
+          return (
+            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: i < recentEvents.length - 1 ? 8 : 0, paddingBottom: i < recentEvents.length - 1 ? 8 : 0, borderBottom: i < recentEvents.length - 1 ? '0.5px solid rgba(255,255,255,0.05)' : 'none' }}>
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <span style={{ fontSize: 10, color: 'rgba(232,230,248,0.8)', textTransform: 'capitalize' }}>{e.eventType}</span>
+                <span style={{ fontSize: 9, color: 'rgba(232,230,248,0.3)', marginLeft: 6, textTransform: 'capitalize' }}>{e.adNetwork} · {e.adFormat}</span>
+              </div>
+              <span style={{ fontSize: 8, color: 'rgba(232,230,248,0.25)' }}>
+                {e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+              </span>
+            </div>
+          );
+        })}
       </div>
-
-      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Active alerts</div>
-      {alerts.map((a, i) => (
-        <div key={i} style={{
-          background: '#181828', border: `0.5px solid ${a.cardBorder}`,
-          borderRadius: 8, padding: '11px 12px', marginBottom: 6,
-          display: 'flex', alignItems: 'center', gap: 10
-        }}>
-          <div style={{ width: 7, height: 7, borderRadius: '50%', background: a.dot, flexShrink: 0 }} />
-          <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.85)', flex: 1, lineHeight: 1.4 }}>{a.text}</div>
-          <span style={{
-            fontSize: 9, fontWeight: 600, padding: '3px 8px', borderRadius: 20,
-            background: a.tagBg, color: a.tagColor,
-            border: `0.5px solid ${a.tagColor}40`, flexShrink: 0
-          }}>{a.tag}</span>
-        </div>
-      ))}
-
-      <div style={{ marginTop: 14, padding: '8px 12px', background: 'rgba(74,222,128,0.05)', border: '0.5px solid rgba(74,222,128,0.15)', borderRadius: 8, fontSize: 9, color: 'rgba(74,222,128,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
+ 
+      {/* Live indicator */}
+      <div style={{ marginTop: 6, padding: '8px 12px', background: 'rgba(74,222,128,0.05)', border: '0.5px solid rgba(74,222,128,0.15)', borderRadius: 8, fontSize: 9, color: 'rgba(74,222,128,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#4ADE80' }} />
-        Live · updates in real time from Firestore
+        Live · {events.length} events · updates in real time from Firestore
       </div>
     </div>
   );
