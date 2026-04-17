@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
- 
+
 interface AdEvent {
   id: string;
   adNetwork: string;
@@ -13,7 +13,7 @@ interface AdEvent {
   timestamp: number;
   serverTimestamp: any;
 }
- 
+
 interface Metrics {
   completion_rate: number;
   churn_rate: number;
@@ -22,34 +22,34 @@ interface Metrics {
   network_counts: Record<string, number>;
   network_durations: Record<string, number[]>;
 }
- 
+
 function computeMetrics(events: AdEvent[]): Metrics {
   const total = events.filter(e => e.eventType === 'started').length;
   const completed = events.filter(e => e.eventType === 'completed').length;
   const skipped = events.filter(e => e.eventType === 'skipped').length;
- 
+
   const completion_rate = total > 0 ? Math.round((completed / total) * 100) : 0;
   const churn_rate = total > 0 ? parseFloat(((skipped / total) * 100).toFixed(1)) : 0;
- 
+
   const resumeTimes = events.filter(e => e.eventType === 'completed' && e.durationMs > 0).map(e => e.durationMs);
   const avg_resume_time_ms = resumeTimes.length > 0
     ? Math.round(resumeTimes.reduce((a, b) => a + b, 0) / resumeTimes.length)
     : 0;
- 
+
   const network_counts: Record<string, number> = {};
   const network_durations: Record<string, number[]> = {};
- 
+
   events.filter(e => e.eventType === 'started').forEach(e => {
     const n = e.adNetwork || 'unknown';
     network_counts[n] = (network_counts[n] || 0) + 1;
   });
- 
+
   events.filter(e => e.durationMs > 0).forEach(e => {
     const n = e.adNetwork || 'unknown';
     if (!network_durations[n]) network_durations[n] = [];
     network_durations[n].push(e.durationMs);
   });
- 
+
   return {
     completion_rate,
     churn_rate,
@@ -59,11 +59,11 @@ function computeMetrics(events: AdEvent[]): Metrics {
     network_durations,
   };
 }
- 
+
 export default function DashboardScreen() {
   const [events, setEvents] = useState<AdEvent[]>([]);
   const [loading, setLoading] = useState(true);
- 
+
   useEffect(() => {
     const q = query(
       collection(db, 'adEvents'),
@@ -77,11 +77,10 @@ export default function DashboardScreen() {
     });
     return () => unsubscribe();
   }, []);
- 
+
   const metrics = computeMetrics(events);
- 
   const totalNetworkEvents = Object.values(metrics.network_counts).reduce((a, b) => a + b, 0) || 1;
- 
+
   const NETWORK_COLORS: Record<string, string> = {
     admob: '#4ADE80',
     unity: '#60A5FA',
@@ -89,7 +88,7 @@ export default function DashboardScreen() {
     applovin: '#F87171',
     unknown: 'rgba(255,255,255,0.25)',
   };
- 
+
   const networks = Object.entries(metrics.network_counts).map(([name, count]) => {
     const durations = metrics.network_durations[name] || [];
     const avgDuration = durations.length > 0
@@ -102,15 +101,15 @@ export default function DashboardScreen() {
       flag: avgDuration && avgDuration > 45 ? `${avgDuration}s avg` : null,
     };
   }).sort((a, b) => b.pct - a.pct);
- 
+
   const recentEvents = events.slice(0, 5);
- 
+
   const fmt = (ms: number) => {
     if (ms === 0) return '—';
     if (ms < 60000) return `${Math.round(ms / 1000)}s`;
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   };
- 
+
   if (loading) {
     return (
       <div style={{ padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
@@ -121,7 +120,7 @@ export default function DashboardScreen() {
       </div>
     );
   }
- 
+
   if (events.length === 0) {
     return (
       <div style={{ padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
@@ -133,11 +132,10 @@ export default function DashboardScreen() {
       </div>
     );
   }
- 
+
   return (
     <div style={{ padding: 16, maxWidth: 480, margin: '0 auto' }}>
- 
-      {/* Session Health */}
+
       <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Session health</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
         {[
@@ -156,8 +154,7 @@ export default function DashboardScreen() {
           </div>
         ))}
       </div>
- 
-      {/* Network Breakdown */}
+
       {networks.length > 0 && (
         <>
           <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Network breakdown</div>
@@ -176,8 +173,7 @@ export default function DashboardScreen() {
           </div>
         </>
       )}
- 
-      {/* Recent Events */}
+
       <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Recent events</div>
       <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
         {recentEvents.map((e, i) => {
@@ -199,8 +195,7 @@ export default function DashboardScreen() {
           );
         })}
       </div>
- 
-      {/* Live indicator */}
+
       <div style={{ marginTop: 6, padding: '8px 12px', background: 'rgba(74,222,128,0.05)', border: '0.5px solid rgba(74,222,128,0.15)', borderRadius: 8, fontSize: 9, color: 'rgba(74,222,128,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#4ADE80' }} />
         Live · {events.length} events · updates in real time from Firestore
