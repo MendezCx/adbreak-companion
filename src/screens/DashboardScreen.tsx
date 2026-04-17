@@ -8,20 +8,59 @@ interface AdEvent {
   adFormat: string;
   eventType: string;
   durationMs: number;
+  gameId: string;
+  sessionId: string;
   timestamp: number;
+  serverTimestamp: any;
 }
 
-interface DayStats {
-  day: string;
-  completions: number;
-  churn: number;
+interface Metrics {
+  completion_rate: number;
+  churn_rate: number;
+  avg_resume_time_ms: number;
+  total_breaks: number;
+  network_counts: Record<string, number>;
+  network_durations: Record<string, number[]>;
 }
 
-interface Props {
-  onRunSim: () => void;
+function computeMetrics(events: AdEvent[]): Metrics {
+  const total = events.filter(e => e.eventType === 'started').length;
+  const completed = events.filter(e => e.eventType === 'completed').length;
+  const skipped = events.filter(e => e.eventType === 'skipped').length;
+
+  const completion_rate = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const churn_rate = total > 0 ? parseFloat(((skipped / total) * 100).toFixed(1)) : 0;
+
+  const resumeTimes = events.filter(e => e.eventType === 'completed' && e.durationMs > 0).map(e => e.durationMs);
+  const avg_resume_time_ms = resumeTimes.length > 0
+    ? Math.round(resumeTimes.reduce((a, b) => a + b, 0) / resumeTimes.length)
+    : 0;
+
+  const network_counts: Record<string, number> = {};
+  const network_durations: Record<string, number[]> = {};
+
+  events.filter(e => e.eventType === 'started').forEach(e => {
+    const n = e.adNetwork || 'unknown';
+    network_counts[n] = (network_counts[n] || 0) + 1;
+  });
+
+  events.filter(e => e.durationMs > 0).forEach(e => {
+    const n = e.adNetwork || 'unknown';
+    if (!network_durations[n]) network_durations[n] = [];
+    network_durations[n].push(e.durationMs);
+  });
+
+  return {
+    completion_rate,
+    churn_rate,
+    avg_resume_time_ms,
+    total_breaks: total,
+    network_counts,
+    network_durations,
+  };
 }
 
-export default function AnalyticsScreen({ onRunSim }: Props) {
+export default function DashboardScreen() {
   const [events, setEvents] = useState<AdEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -29,7 +68,7 @@ export default function AnalyticsScreen({ onRunSim }: Props) {
     const q = query(
       collection(db, 'adEvents'),
       orderBy('timestamp', 'desc'),
-      limit(500)
+      limit(200)
     );
     const unsubscribe = onSnapshot(q, (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as AdEvent));
@@ -39,70 +78,37 @@ export default function AnalyticsScreen({ onRunSim }: Props) {
     return () => unsubscribe();
   }, []);
 
-  // ── Compute day-by-day stats ──────────────────────────────────────────────
-  const dayStats: DayStats[] = (() => {
-    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const buckets: Record<string, { completions: number; churn: number }> = {};
-    days.forEach(d => { buckets[d] = { completions: 0, churn: 0 }; });
+  const metrics = computeMetrics(events);
+  const totalNetworkEvents = Object.values(metrics.network_counts).reduce((a, b) => a + b, 0) || 1;
 
-    events.forEach(e => {
-      const day = days[new Date(e.timestamp).getDay()];
-      if (e.eventType === 'completed') buckets[day].completions++;
-      if (e.eventType === 'skipped') buckets[day].churn++;
-    });
+  const NETWORK_COLORS: Record<string, string> = {
+    admob: '#4ADE80',
+    unity: '#60A5FA',
+    ironsource: '#A78BFA',
+    applovin: '#F87171',
+    unknown: 'rgba(255,255,255,0.25)',
+  };
 
-    // Return last 7 days in order
-    const today = new Date().getDay();
-    return Array.from({ length: 7 }, (_, i) => {
-      const idx = (today - 6 + i + 7) % 7;
-      return { day: days[idx], ...buckets[days[idx]] };
-    });
-  })();
+  const networks = Object.entries(metrics.network_counts).map(([name, count]) => {
+    const durations = metrics.network_durations[name] || [];
+    const avgDuration = durations.length > 0
+      ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length / 1000)
+      : null;
+    return {
+      name,
+      pct: Math.round((count / totalNetworkEvents) * 100),
+      color: NETWORK_COLORS[name] || 'rgba(255,255,255,0.25)',
+      flag: avgDuration && avgDuration > 45 ? `${avgDuration}s avg` : null,
+    };
+  }).sort((a, b) => b.pct - a.pct);
 
-  // ── Ad length distribution ────────────────────────────────────────────────
-  const durationBuckets = (() => {
-    const withDuration = events.filter(e => e.durationMs > 0);
-    const total = withDuration.length || 1;
-    const b0 = withDuration.filter(e => e.durationMs < 15000).length;
-    const b1 = withDuration.filter(e => e.durationMs >= 15000 && e.durationMs < 30000).length;
-    const b2 = withDuration.filter(e => e.durationMs >= 30000 && e.durationMs < 60000).length;
-    const b3 = withDuration.filter(e => e.durationMs >= 60000).length;
-    return [
-      { label: '0–15s', pct: Math.round((b0 / total) * 100), color: '#4ADE80' },
-      { label: '15–30s', pct: Math.round((b1 / total) * 100), color: '#4ADE80' },
-      { label: '30–60s', pct: Math.round((b2 / total) * 100), color: '#FBBF24' },
-      { label: '60s+', pct: Math.round((b3 / total) * 100), color: '#F87171' },
-    ];
-  })();
+  const recentEvents = events.slice(0, 5);
 
-  // ── High churn network detection ─────────────────────────────────────────
-  const highChurnNetwork = (() => {
-    const networks: Record<string, { started: number; skipped: number }> = {};
-    events.forEach(e => {
-      const n = e.adNetwork || 'unknown';
-      if (!networks[n]) networks[n] = { started: 0, skipped: 0 };
-      if (e.eventType === 'started') networks[n].started++;
-      if (e.eventType === 'skipped') networks[n].skipped++;
-    });
-    let worst = '';
-    let worstRate = 0;
-    Object.entries(networks).forEach(([n, s]) => {
-      const rate = s.started > 0 ? s.skipped / s.started : 0;
-      if (rate > worstRate) { worstRate = rate; worst = n; }
-    });
-    return worst ? { name: worst, rate: Math.round(worstRate * 100) } : null;
-  })();
-
-  // ── Long ads detection ────────────────────────────────────────────────────
-  const longAdPct = durationBuckets[3].pct;
-  const hasLongAdIssue = longAdPct > 5;
-
-  // ── Chart scaling ─────────────────────────────────────────────────────────
-  const maxVal = Math.max(...dayStats.map(d => Math.max(d.completions, d.churn)), 1);
-  const scaleY = (val: number) => 70 - (val / maxVal) * 55;
-
-  const chartPoints = (key: 'completions' | 'churn') =>
-    dayStats.map((d, i) => `${(i / 6) * 320},${scaleY(d[key])}`).join(' ');
+  const fmt = (ms: number) => {
+    if (ms === 0) return '—';
+    if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+    return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+  };
 
   if (loading) {
     return (
@@ -119,9 +125,9 @@ export default function AnalyticsScreen({ onRunSim }: Props) {
     return (
       <div style={{ padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 24, marginBottom: 8 }}>📊</div>
-          <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.4)', marginBottom: 4 }}>No data yet</div>
-          <div style={{ fontSize: 9, color: 'rgba(232,230,248,0.2)' }}>Analytics will appear once your SDK sends events</div>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>📭</div>
+          <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.4)', marginBottom: 4 }}>No events yet</div>
+          <div style={{ fontSize: 9, color: 'rgba(232,230,248,0.2)' }}>Events will appear here once your SDK sends data</div>
         </div>
       </div>
     );
@@ -130,107 +136,67 @@ export default function AnalyticsScreen({ onRunSim }: Props) {
   return (
     <div style={{ padding: 16, maxWidth: 480, margin: '0 auto' }}>
 
-      {/* Auto-suggest */}
-      {highChurnNetwork && (
-        <div style={{ background: 'rgba(96,165,250,0.07)', border: '0.5px solid rgba(96,165,250,0.2)', borderRadius: 12, padding: 13, marginBottom: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#A78BFA' }} />
-            <span style={{ fontSize: 9, fontWeight: 600, color: '#A78BFA', letterSpacing: '.04em' }}>Auto-suggest</span>
-          </div>
-          <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.55)', lineHeight: 1.5, marginBottom: 10 }}>
-            High churn detected from <span style={{ color: '#fff', textTransform: 'capitalize' }}>{highChurnNetwork.name}</span> ({highChurnNetwork.rate}% skip rate). Want to simulate this condition now?
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={onRunSim} style={{ flex: 1, padding: 8, background: '#60A5FA', border: 'none', borderRadius: 7, color: '#fff', fontSize: 10, fontWeight: 600, cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace" }}>Run simulation</button>
-            <button style={{ flex: 1, padding: 8, background: 'rgba(255,255,255,0.05)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 7, color: 'rgba(232,230,248,0.55)', fontSize: 10, cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace" }}>Dismiss</button>
-          </div>
-        </div>
-      )}
-
-      {/* Chart */}
-      <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: 14, marginBottom: 12 }}>
-        <div style={{ fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 10 }}>Completions vs churn · 7 days</div>
-        <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9, color: 'rgba(232,230,248,0.55)' }}>
-            <div style={{ width: 14, height: 2, background: '#4ADE80', borderRadius: 1 }} />
-            <span>Completions</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9, color: 'rgba(232,230,248,0.55)' }}>
-            <div style={{ width: 14, height: 2, background: '#F87171', borderRadius: 1 }} />
-            <span>Post-break churn</span>
-          </div>
-        </div>
-        <svg width="100%" viewBox="0 0 320 90" style={{ display: 'block' }}>
-          <line x1="0" y1="70" x2="320" y2="70" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
-          <line x1="0" y1="45" x2="320" y2="45" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
-          <line x1="0" y1="20" x2="320" y2="20" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
-          {maxVal > 0 && (
-            <>
-              <polyline points={chartPoints('completions')} fill="none" stroke="#4ADE80" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              <polyline points={chartPoints('churn')} fill="none" stroke="#F87171" strokeWidth="1.5" strokeDasharray="3,2" strokeLinecap="round" strokeLinejoin="round" />
-            </>
-          )}
-          {dayStats.map((d, i) => (
-            <text key={d.day} x={(i / 6) * 300 + 10} y="84" fill="rgba(232,230,248,0.25)" fontSize="7" fontFamily="'JetBrains Mono', monospace">{d.day}</text>
-          ))}
-        </svg>
-      </div>
-
-      {/* Ad length distribution */}
-      <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: 14, marginBottom: 12 }}>
-        <div style={{ fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 10 }}>Ad length distribution</div>
-        {durationBuckets.map((b, i) => (
-          <div key={i} style={{ marginBottom: i < 3 ? 7 : 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginBottom: 3 }}>
-              <span style={{ color: b.color === '#F87171' ? '#F87171' : 'rgba(232,230,248,0.55)' }}>{b.label}</span>
-              <span style={{ color: b.color }}>{b.pct}%</span>
-            </div>
-            <div style={{ height: 3, background: 'rgba(255,255,255,0.07)', borderRadius: 2 }}>
-              <div style={{ height: 3, width: `${b.pct}%`, background: b.color, borderRadius: 2 }} />
-            </div>
+      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Session health</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {[
+          { val: `${metrics.completion_rate}%`, label: 'Completion rate', green: true, hero: false },
+          { val: `${metrics.churn_rate}%`, label: 'Churn after ad', green: false, hero: false },
+          { val: fmt(metrics.avg_resume_time_ms), label: 'Avg duration ★', green: true, hero: true },
+          { val: `${metrics.total_breaks}`, label: 'Total breaks', green: false, hero: false },
+        ].map((s, i) => (
+          <div key={i} style={{
+            background: s.hero ? 'rgba(74,222,128,0.07)' : '#181828',
+            border: `0.5px solid ${s.hero ? 'rgba(74,222,128,0.2)' : 'rgba(255,255,255,0.07)'}`,
+            borderRadius: 8, padding: '10px 12px'
+          }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: s.green ? '#4ADE80' : '#fff' }}>{s.val}</div>
+            <div style={{ fontSize: 9, color: s.hero ? 'rgba(74,222,128,0.5)' : 'rgba(232,230,248,0.3)', marginTop: 3 }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Recommendations */}
-      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Recommendations</div>
-
-      {hasLongAdIssue && (
-        <div style={{ background: 'rgba(251,191,36,0.06)', border: '0.5px solid rgba(251,191,36,0.2)', borderRadius: 12, padding: '10px 12px', marginBottom: 8 }}>
-          <div style={{ display: 'flex', gap: 7, marginBottom: 10 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#FBBF24', marginTop: 3, flexShrink: 0 }} />
-            <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.55)', lineHeight: 1.5 }}>
-              {longAdPct}% of ads are 60s+ — consider capping max ad duration to reduce churn
-            </div>
+      {networks.length > 0 && (
+        <>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Network breakdown</div>
+          <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+            {networks.map((n, i) => (
+              <div key={i} style={{ marginBottom: i < networks.length - 1 ? 10 : 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, color: n.flag ? '#F87171' : 'rgba(232,230,248,0.55)', textTransform: 'capitalize' }}>{n.name}</span>
+                  <span style={{ fontSize: 10, color: n.color }}>{n.pct}%{n.flag ? ` · ${n.flag}` : ''}</span>
+                </div>
+                <div style={{ height: 3, background: 'rgba(255,255,255,0.07)', borderRadius: 2 }}>
+                  <div style={{ height: 3, width: `${n.pct}%`, background: n.color, borderRadius: 2 }} />
+                </div>
+              </div>
+            ))}
           </div>
-          <button onClick={onRunSim} style={{ width: '100%', padding: 7, background: 'rgba(96,165,250,0.15)', border: '0.5px solid rgba(96,165,250,0.3)', borderRadius: 7, color: '#60A5FA', fontSize: 9, fontWeight: 600, cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace" }}>Run simulation</button>
-        </div>
+        </>
       )}
 
-      {highChurnNetwork && (
-        <div style={{ background: 'rgba(255,255,255,0.03)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '10px 12px', marginBottom: 8 }}>
-          <div style={{ display: 'flex', gap: 7 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#F87171', marginTop: 3, flexShrink: 0 }} />
-            <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.55)', lineHeight: 1.5 }}>
-              <span style={{ textTransform: 'capitalize' }}>{highChurnNetwork.name}</span> has the highest skip rate at {highChurnNetwork.rate}% — review ad frequency settings
+      <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: 'rgba(232,230,248,0.3)', marginBottom: 8 }}>Recent events</div>
+      <div style={{ background: '#181828', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+        {recentEvents.map((e, i) => {
+          const color = e.eventType === 'completed' ? '#4ADE80'
+            : e.eventType === 'failed' ? '#F87171'
+            : e.eventType === 'skipped' ? '#FBBF24'
+            : '#60A5FA';
+          return (
+            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: i < recentEvents.length - 1 ? 8 : 0, paddingBottom: i < recentEvents.length - 1 ? 8 : 0, borderBottom: i < recentEvents.length - 1 ? '0.5px solid rgba(255,255,255,0.05)' : 'none' }}>
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <span style={{ fontSize: 10, color: 'rgba(232,230,248,0.8)', textTransform: 'capitalize' }}>{e.eventType}</span>
+                <span style={{ fontSize: 9, color: 'rgba(232,230,248,0.3)', marginLeft: 6, textTransform: 'capitalize' }}>{e.adNetwork} · {e.adFormat}</span>
+              </div>
+              <span style={{ fontSize: 8, color: 'rgba(232,230,248,0.25)' }}>
+                {e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+              </span>
             </div>
-          </div>
-        </div>
-      )}
+          );
+        })}
+      </div>
 
-      {!hasLongAdIssue && !highChurnNetwork && (
-        <div style={{ background: 'rgba(74,222,128,0.06)', border: '0.5px solid rgba(74,222,128,0.2)', borderRadius: 12, padding: '10px 12px' }}>
-          <div style={{ display: 'flex', gap: 7 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#4ADE80', marginTop: 3, flexShrink: 0 }} />
-            <div style={{ fontSize: 11, color: 'rgba(232,230,248,0.55)', lineHeight: 1.5 }}>
-              No major issues detected — ad experience looks healthy! Keep monitoring.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Live indicator */}
-      <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(74,222,128,0.05)', border: '0.5px solid rgba(74,222,128,0.15)', borderRadius: 8, fontSize: 9, color: 'rgba(74,222,128,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ marginTop: 6, padding: '8px 12px', background: 'rgba(74,222,128,0.05)', border: '0.5px solid rgba(74,222,128,0.15)', borderRadius: 8, fontSize: 9, color: 'rgba(74,222,128,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#4ADE80' }} />
         Live · {events.length} events · updates in real time from Firestore
       </div>
