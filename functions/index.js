@@ -6,10 +6,21 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // Log ad events from SDK
-exports.logAdEvent = onRequest(async (req, res) => {
+exports.logAdEvent = onRequest({
+  cors: true
+}, async (req, res) => {
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(204).send("");
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
+
   try {
     const event = req.body;
     event.serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
