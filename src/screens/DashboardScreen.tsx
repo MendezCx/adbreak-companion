@@ -27,7 +27,6 @@ function computeMetrics(events: AdEvent[]): Metrics {
   const total = events.filter(e => e.eventType === 'started').length;
   const completed = events.filter(e => e.eventType === 'completed').length;
   const skipped = events.filter(e => e.eventType === 'skipped').length;
-  const failed = events.filter(e => e.eventType === 'failed').length;
  
   const completion_rate = total > 0 ? Math.round((completed / total) * 100) : 0;
   const churn_rate = total > 0 ? parseFloat(((skipped / total) * 100).toFixed(1)) : 0;
